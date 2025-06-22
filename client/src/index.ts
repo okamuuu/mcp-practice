@@ -1,6 +1,7 @@
 import * as readline from "node:readline/promises";
 import { spawn } from "node:child_process";
 import { intro, isCancel, select, text } from "@clack/prompts";
+const chalk = require("chalk");
 
 type Tool = {
   name: string;
@@ -18,6 +19,34 @@ type Resource = {
 type Content = {
   text: string;
 };
+
+console.log(process.env.ANTHROPIC_API_KEY);
+
+async function callAI(
+  messages: { role: string; content: string }[],
+  tools: any[]
+) {
+  console.log({ messages, tools });
+
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "x-api-key": process.env.ANTHROPIC_API_KEY!,
+      "anthropic-version": "2023-06-01",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "claude-3-7-sonnet-20250219",
+      max_tokens: 4096,
+      messages,
+      tools,
+    }),
+  });
+
+  const data = await response.json();
+  console.log(data);
+  return data.content;
+}
 
 (async function main() {
   const serverProcess = spawn("node", ["../server/dist/index.js"], {
@@ -79,6 +108,20 @@ type Content = {
 
   intro(`Connected to ${serverInfo.name} v${serverInfo.version}`);
 
+  async function callAIWithTools(
+    messages: { role: string; content: string }[]
+  ) {
+    const result = await callAI(
+      messages,
+      tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description,
+        input_schema: tool.inputSchema,
+      }))
+    );
+    return result;
+  }
+
   function dumpContent(content: { text: string }[]) {
     for (const line of content) {
       try {
@@ -91,8 +134,10 @@ type Content = {
 
   while (true) {
     const options = [
-      { value: "tool", label: "Run a tool" },
-      { value: "resource", label: "Get a resource" },
+      { value: "ai", label: "Ask the AI" },
+
+      // { value: "tool", label: "Run a tool" },
+      // { value: "resource", label: "Get a resource" },
     ];
     // if (resources.length > 0) {
     //   options.unshift({ value: "resource", label: "Get a resource" });
@@ -164,6 +209,67 @@ type Content = {
       );
 
       dumpContent(contents);
+    }
+    if (action === "ai") {
+      const prompt = await text({
+        message: "What would you like to ask?",
+        defaultValue: "What kinds of drinks do you have?",
+      });
+      if (isCancel(prompt)) {
+        process.exit(0);
+      }
+
+      const messages: {
+        type?: string;
+        role: string;
+        content: any;
+        name?: string;
+        input?: any;
+      }[] = [{ role: "user", content: prompt }];
+      const promptResult = await callAIWithTools(messages);
+
+      messages.push({
+        role: "assistant",
+        content: promptResult,
+      });
+      for (const tool of promptResult) {
+        if (tool.type === "text") {
+          console.log(tool.text);
+        }
+      }
+
+      if (promptResult[promptResult.length - 1].type === "tool_use") {
+        console.log(
+          chalk.blueBright(
+            `Requesting tool call ${
+              promptResult[promptResult.length - 1].name
+            } - ${JSON.stringify(promptResult[promptResult.length - 1].input)}`
+          )
+        );
+
+        const { content }: { content: Content[] } = await send("tools/call", {
+          name: promptResult[promptResult.length - 1].name,
+          arguments: promptResult[promptResult.length - 1].input,
+        });
+
+        messages.push({
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: promptResult[promptResult.length - 1].id,
+              content: content[0].text,
+            },
+          ],
+        });
+
+        const followupResult = await callAIWithTools(messages);
+        for (const tool of followupResult) {
+          if (tool.type === "text") {
+            console.log(tool.text);
+          }
+        }
+      }
     }
   }
 })();
